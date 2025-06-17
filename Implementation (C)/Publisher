@@ -1,1 +1,160 @@
+#include <SPI.h>
+#include <WiFiNINA.h>
+#include <PubSubClient.h>
+#include "DHT.h"
+
+// ─── CONFIGURATION ──────────────────────────────────────────
+// Your local Wi-Fi network credentials:
+char ssid[] = "WLAN-129261";
+char pass[] = "30468577872818695219";
+
+// Local Mosquitto broker (assumes no authentication):
+const char* local_mqtt_server = "192.168.2.156";  // ← change to your Pi’s IP
+const int   local_mqtt_port   = 1883;
+
+// Adafruit IO settings:
+const char* aio_server    = "io.adafruit.com";
+const int   aio_port      = 1883;                // non-TLS port
+const char* aio_username  = "ismail343"; // ← e.g. "johndoe"
+const char* aio_key       = "aio_lRmM99iaw1rnSnl74HY6WWbCY9VV";      // ← e.g. "aio_abcdef0123456789"
+// ────────────────────────────────────────────────────────────
+
+// Sensor pins:
+const int moisturePin = A0;       // soil moisture analog pin
+#define DHTPIN   2               // DHT11 data pin (digital 2)
+#define DHTTYPE  DHT11           // DHT11 sensor type
+DHT dht(DHTPIN, DHTTYPE);
+
+// Two MQTT clients (one local, one cloud):
+WiFiClient   wifiClient;
+PubSubClient clientLocal(wifiClient);
+PubSubClient clientAIO(wifiClient);
+
+void reconnectLocal() {
+  while (!clientLocal.connected()) {
+    Serial.print("Connecting to local Mosquitto...");
+    if (clientLocal.connect("publisherLocal")) {
+      Serial.println("connected (local)");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(clientLocal.state());
+      Serial.println(" – retrying in 5s");
+      delay(5000);
+    }
+  }
+}
+
+void reconnectAIO() {
+  while (!clientAIO.connected()) {
+    Serial.print("Connecting to Adafruit IO...");
+    if (clientAIO.connect("publisherAIO", aio_username, aio_key)) {
+      Serial.println("connected (AIO)");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(clientAIO.state());
+      Serial.println(" – retrying in 5s");
+      delay(5000);
+    }
+  }
+}
+
+void publishSensorData() {
+  // 1) Read soil moisture:
+  int moistureValue = analogRead(moisturePin);
+  Serial.print("Soil moisture: ");
+  Serial.println(moistureValue);
+  String strMoisture = String(moistureValue);
+
+  // 2) Read DHT11 humidity & temperature:
+  float humidity    = dht.readHumidity();
+  float temperature = dht.readTemperature();
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("Failed to read DHT sensor!");
+    return;
+  }
+  Serial.print("Humidity: ");
+  Serial.print(humidity);
+  Serial.print(" %  Temperature: ");
+  Serial.print(temperature);
+  Serial.println(" °C");
+
+  String strHumidity = String(humidity);
+  String strTemp     = String(temperature);
+
+  // ───────────────────────────────────────────────────────────────────
+  // A) Publish to LOCAL Mosquitto
+  // ───────────────────────────────────────────────────────────────────
+  if (!clientLocal.connected()) {
+    reconnectLocal();
+  }
+  clientLocal.loop();
+  clientLocal.publish("farm/moisture", strMoisture.c_str());
+  clientLocal.publish("farm/humidity", strHumidity.c_str());
+  clientLocal.publish("farm/temperature", strTemp.c_str());
+
+  // ───────────────────────────────────────────────────────────────────
+  // B) Publish to ADAFRUIT IO
+  // ───────────────────────────────────────────────────────────────────
+  if (!clientAIO.connected()) {
+    reconnectAIO();
+  }
+  clientAIO.loop();
+
+  // Build each AIO topic: "<username>/feeds/<feed-slug>"
+  String topicMoisture = String(aio_username) + "/feeds/soil-moisture";
+  String topicHumidity = String(aio_username) + "/feeds/humidity";
+  String topicTemp     = String(aio_username) + "/feeds/temperature";
+
+  clientAIO.publish(topicMoisture.c_str(), strMoisture.c_str());
+  clientAIO.publish(topicHumidity.c_str(), strHumidity.c_str());
+  clientAIO.publish(topicTemp.c_str(), strTemp.c_str());
+}
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial);  // wait for Serial Monitor to open
+
+  // 1) Connect to Wi-Fi
+  Serial.print("Connecting to Wi-Fi: ");
+  Serial.println(ssid);
+  while (WiFi.begin(ssid, pass) != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWi-Fi connected!");
+  Serial.print("Publisher IP: ");
+  Serial.println(WiFi.localIP());
+
+  // 2) Initialize DHT sensor
+  dht.begin();
+
+  // 3) Point each client at its broker:
+  clientLocal.setServer(local_mqtt_server, local_mqtt_port);
+  clientAIO.setServer(aio_server, aio_port);
+}
+
+void loop() {
+  // A) Ensure Wi-Fi
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.print("Reconnecting Wi-Fi...");
+    while (WiFi.begin(ssid, pass) != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println("\nWi-Fi reconnected!");
+  }
+
+  // B) Publish sensor data every 10 seconds:
+  static unsigned long lastMillis = 0;
+  if (millis() - lastMillis > 10000) {
+    lastMillis = millis();
+    publishSensorData();
+  }
+
+  // C) Maintain both MQTT connections:
+  if (clientLocal.connected()) clientLocal.loop();
+  if (clientAIO.connected())   clientAIO.loop();
+}
+
+
 
